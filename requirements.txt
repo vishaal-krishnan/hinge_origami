@@ -1,6 +1,9 @@
 streamlit
 plotly
+jax
+jaxlib
 numpy
-pandas
 scipy
 matplotlib
+plotly
+pandas
