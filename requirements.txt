@@ -1,9 +1,10 @@
-streamlit
-plotly
 jax
 jaxlib
+optax
+dm-haiku
 numpy
 scipy
+pandas
 matplotlib
 plotly
-pandas
+tqdm
