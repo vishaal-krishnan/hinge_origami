@@ -16,19 +16,6 @@ import jax.numpy as jnp
 import optax
 
 
-from pathlib import Path
-
-DEFAULT_TORQUE_PATH = Path(__file__).parent / "data" / "unit075_torque.txt"
-
-uploaded_file = st.file_uploader("Upload your torque data file", type=["txt", "csv"])
-
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file, delim_whitespace=True)  # or sep=','
-else:
-    st.info("Using default torque.txt")
-    df = pd.read_csv(DEFAULT_TORQUE_PATH, delim_whitespace=True)
-
-
 # -----------------------
 # UI
 # -----------------------
