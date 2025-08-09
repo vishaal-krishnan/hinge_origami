@@ -15,6 +15,11 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from pathlib import Path
+
+# Path to bundled default torque file
+DEFAULT_TORQUE_PATH = Path(__file__).parent / "data" / "unit075_torque.txt"
+
 
 # -----------------------
 # UI
@@ -380,7 +385,8 @@ def plot_hinge_angles(X, faces, hinges, signed_angles):
 # Data + Run
 # -----------------------
 def read_dataframe(uploaded, delim):
-    if uploaded is None: return None
+    if uploaded is None: 
+        return None
     data = uploaded.read()
     if delim == "auto":
         try:
@@ -396,68 +402,94 @@ def read_dataframe(uploaded, delim):
     df.columns = ["Angle", "Torque"]
     return df
 
+# --- File -> DataFrame (uploaded OR default) ---
 if uploaded:
     df = read_dataframe(uploaded, delim)
-    st.write("Preview:", df.head())
+    st.success("File uploaded successfully!")
+else:
+    st.info("Using default torque.txt")
+    if DEFAULT_TORQUE_PATH.exists():
+        # Try to honor the delimiter choice; default is whitespace
+        if delim in ("auto", "space"):
+            df = pd.read_csv(DEFAULT_TORQUE_PATH, header=None, sep=r"\s+")
+        elif delim == "comma":
+            df = pd.read_csv(DEFAULT_TORQUE_PATH, header=None)
+        else:  # tab
+            df = pd.read_csv(DEFAULT_TORQUE_PATH, header=None, sep="\t")
+        df.columns = ["Angle", "Torque"]
+    else:
+        st.error(f"Default file not found at: {DEFAULT_TORQUE_PATH}")
+        st.stop()
 
-    # --- Calibrate spline and energy ---
-    sort_idx = np.argsort(df['Angle'].values)
-    angles = df['Angle'].values[sort_idx] * np.pi / 180.0
-    torques = df['Torque'].values[sort_idx]
-    spline = UnivariateSpline(angles, torques, s=float(smoothing))
-    angle_smooth = np.linspace(angles.min(), angles.max(), 500)
-    torque_smooth = spline(angle_smooth)
-    slope_smooth = spline.derivative()(angle_smooth)
-    energy_smooth = cumulative_trapezoid(torque_smooth, angle_smooth, initial=0.0)
-    energy_smooth -= energy_smooth.min()
+# Preview
+st.write("Preview:", df.head())
 
-    # expose to JAX lookup
-    theta_exp = jnp.array(angle_smooth)
-    E_exp     = jnp.array(energy_smooth)
+# --- Calibrate spline and energy ---
+sort_idx = np.argsort(df['Angle'].values)
+angles = df['Angle'].values[sort_idx] * np.pi / 180.0
+torques = df['Torque'].values[sort_idx]
+spline = UnivariateSpline(angles, torques, s=float(smoothing))
+angle_smooth = np.linspace(angles.min(), angles.max(), 500)
+torque_smooth = spline(angle_smooth)
+slope_smooth = spline.derivative()(angle_smooth)
+energy_smooth = cumulative_trapezoid(torque_smooth, angle_smooth, initial=0.0)
+energy_smooth -= energy_smooth.min()
 
-    st.subheader("Calibration Plots")
-    st.plotly_chart(plot_torque_stiffness_energy(angle_smooth, torque_smooth, slope_smooth, energy_smooth), use_container_width=True)
+# expose to JAX lookup
+theta_exp = jnp.array(angle_smooth)
+E_exp     = jnp.array(energy_smooth)
 
-    # --- Build mesh, edges, hinges ---
-    vertices, faces = create_mesh(radius=int(radius))
-    edges = jnp.array(compute_edges(faces))
-    hinges = build_hinge_graph(faces)
+st.subheader("Calibration Plots")
+st.plotly_chart(
+    plot_torque_stiffness_energy(angle_smooth, torque_smooth, slope_smooth, energy_smooth),
+    use_container_width=True
+)
 
-    # Hinge state sampling by probs
-    key = jax.random.PRNGKey(0)
-    state_vals = jnp.array([-1, 0, 1])
-    probs = jnp.array([p_neg, p_zero, p_pos], dtype=jnp.float32)
-    hinge_state = jax.random.choice(key, state_vals, (hinges.shape[0],), p=probs)
+# --- Build mesh, edges, hinges ---
+vertices, faces = create_mesh(radius=int(radius))
+edges = jnp.array(compute_edges(faces))
+hinges = build_hinge_graph(faces)
 
-    # Run simulation
-    if run_btn:
-        st.subheader("Simulation Running…")
-        key = jax.random.PRNGKey(1)
-        traj = simulate(key, vertices, faces, edges, hinges, hinge_state,
-                        steps=int(steps), dt=float(dt), sigma=float(sigma),
-                        theta_gain=float(theta_gain), w_col=float(w_col),
-                        proj_steps=int(proj_steps), proj_lr=float(proj_lr))
+# Hinge state sampling by probs
+key = jax.random.PRNGKey(0)
+state_vals = jnp.array([-1, 0, 1])
+probs = jnp.array([p_neg, p_zero, p_pos], dtype=jnp.float32)
+hinge_state = jax.random.choice(key, state_vals, (hinges.shape[0],), p=probs)
 
-        st.success("Done.")
+# Run simulation
+if run_btn:
+    st.subheader("Simulation Running…")
+    key = jax.random.PRNGKey(1)
+    traj = simulate(
+        key, vertices, faces, edges, hinges, hinge_state,
+        steps=int(steps), dt=float(dt), sigma=float(sigma),
+        theta_gain=float(theta_gain), w_col=float(w_col),
+        proj_steps=int(proj_steps), proj_lr=float(proj_lr)
+    )
 
-        # Animation
-        st.subheader("Mesh Animation")
-        anim_fig = create_plotly_animated_trajectory(traj, faces, edges, frame_stride=max(1, int(steps//50)))
-        st.plotly_chart(anim_fig, use_container_width=True)
+    st.success("Done.")
 
-        # Robust dihedrals and hinge plot
-        st.subheader("Hinge Angles (0–360°)")
-        X_final = np.asarray(traj[-1])
-        angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
-        hinge_fig = plot_hinge_angles(X_final, faces_oriented, hinges_ordered, angles_0_2pi)
-        st.plotly_chart(hinge_fig, use_container_width=True)
+    # Animation
+    st.subheader("Mesh Animation")
+    anim_fig = create_plotly_animated_trajectory(
+        traj, faces, edges, frame_stride=max(1, int(steps//50))
+    )
+    st.plotly_chart(anim_fig, use_container_width=True)
 
-        # Download HTMLs
-        st.subheader("Downloads")
-        anim_html = anim_fig.to_html(full_html=True, include_plotlyjs='cdn')
-        hinge_html = hinge_fig.to_html(full_html=True, include_plotlyjs='cdn')
-        st.download_button("Download Animation (HTML)", data=anim_html, file_name="trajectory.html", mime="text/html")
-        st.download_button("Download Hinge Angles (HTML)", data=hinge_html, file_name="hinge_angles.html", mime="text/html")
+    # Robust dihedrals and hinge plot
+    st.subheader("Hinge Angles (0–360°)")
+    X_final = np.asarray(traj[-1])
+    angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
+    hinge_fig = plot_hinge_angles(X_final, faces_oriented, hinges_ordered, angles_0_2pi)
+    st.plotly_chart(hinge_fig, use_container_width=True)
+
+    # Download HTMLs
+    st.subheader("Downloads")
+    anim_html = anim_fig.to_html(full_html=True, include_plotlyjs='cdn')
+    hinge_html = hinge_fig.to_html(full_html=True, include_plotlyjs='cdn')
+    st.download_button("Download Animation (HTML)", data=anim_html, file_name="trajectory.html", mime="text/html")
+    st.download_button("Download Hinge Angles (HTML)", data=hinge_html, file_name="hinge_angles.html", mime="text/html")
+
 
 else:
     st.info("Upload your torque–angle file to begin.")
