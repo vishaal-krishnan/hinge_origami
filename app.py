@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import re 
 
 
 # SciPy for spline/integration
@@ -33,16 +34,37 @@ uploaded = st.sidebar.file_uploader("File (.txt/.csv): two columns (Angle, Torqu
 delim = st.sidebar.selectbox("Delimiter", ["auto", "space", "comma", "tab"], index=0)
 smoothing = st.sidebar.slider("Spline smoothing (s)", 0.0, 5.0, 0.5, 0.1)
 
-st.sidebar.header("2) Hinge state probabilities")
-p_neg = st.sidebar.slider("P(state = -1)", 0.0, 1.0, 0.33, 0.01)
-p_zero = st.sidebar.slider("P(state = 0)", 0.0, 1.0, 0.34, 0.01)
-p_pos = st.sidebar.slider("P(state = +1)", 0.0, 1.0, 0.33, 0.01)
-p_sum = p_neg + p_zero + p_pos
-if p_sum == 0:
-    st.sidebar.warning("Sum of probabilities is 0; normalizing to equal thirds.")
-    p_neg = p_zero = p_pos = 1/3
+
+# === Sidebar controls ===
+st.sidebar.header("2) Hinge states")
+
+hinge_mode = st.sidebar.radio(
+    "How do you want to set hinge states?",
+    ["Sample by probabilities", "Manual assignment"],
+    index=0
+)
+
+if hinge_mode == "Sample by probabilities":
+    p_neg = st.sidebar.slider("P(state = -1)", 0.0, 1.0, 0.33, 0.01)
+    p_zero = st.sidebar.slider("P(state = 0)", 0.0, 1.0, 0.34, 0.01)
+    p_pos = st.sidebar.slider("P(state = +1)", 0.0, 1.0, 0.33, 0.01)
+    p_sum = p_neg + p_zero + p_pos
+    if p_sum == 0:
+        st.sidebar.warning("Sum of probabilities is 0; normalizing to equal thirds.")
+        p_neg = p_zero = p_pos = 1/3
+    else:
+        p_neg, p_zero, p_pos = np.array([p_neg, p_zero, p_pos]) / p_sum
+
+    state_seed = st.sidebar.number_input("Seed (hinge-state sampling)", value=0, step=1)  # NEW
 else:
-    p_neg, p_zero, p_pos = np.array([p_neg, p_zero, p_pos]) / p_sum
+    # Manual assignment UI
+    st.sidebar.markdown("**Manual assignment**")
+    default_all = st.sidebar.selectbox("Set ALL hinges to:", [-1, 0, 1], index=1)
+    manual_text = st.sidebar.text_area(
+        "Optional: paste custom list (-1 0 1 ...), separated by space/comma/newline",
+        value=""
+    )
+    state_seed = None  # not used in manual mode
 
 st.sidebar.header("3) Simulation")
 steps = st.sidebar.number_input("Steps", 100, 10000, 1000, 100)
@@ -54,7 +76,10 @@ proj_steps = st.sidebar.number_input("Isometry proj steps", 0, 1000, 50, 10)
 proj_lr = st.sidebar.number_input("Isometry proj lr", 1e-5, 1e-1, 1e-2, 1e-3, format="%.5f")
 radius = st.sidebar.number_input("Hex radius (tiles)", 0, 3, 0, 1)
 
+sim_seed = st.sidebar.number_input("Seed (simulation noise)", value=1, step=1)  # NEW
 run_btn = st.sidebar.button("Run Simulation")
+
+
 
 # -----------------------
 # Utilities: Mesh / Geometry
@@ -450,22 +475,49 @@ vertices, faces = create_mesh(radius=int(radius))
 edges = jnp.array(compute_edges(faces))
 hinges = build_hinge_graph(faces)
 
-# Hinge state sampling by probs
-key = jax.random.PRNGKey(0)
+
+# === Hinge state construction (probabilities OR manual) ===
+H = int(hinges.shape[0])  # number of hinges
 state_vals = jnp.array([-1, 0, 1])
-probs = jnp.array([p_neg, p_zero, p_pos], dtype=jnp.float32)
-hinge_state = jax.random.choice(key, state_vals, (hinges.shape[0],), p=probs)
+
+if hinge_mode == "Sample by probabilities":
+    probs = jnp.array([p_neg, p_zero, p_pos], dtype=jnp.float32)
+    key_states = jax.random.PRNGKey(int(state_seed))  # NEW seed
+    hinge_state = jax.random.choice(key_states, state_vals, (H,), p=probs)
+
+else:
+    # Manual assignment
+    if manual_text.strip():
+        # Parse list of ints from text (split on comma/space/newline)
+        tokens = [t for t in re.split(r"[,\s]+", manual_text.strip()) if t]
+        try:
+            vals = np.array([int(t) for t in tokens], dtype=int)
+        except ValueError:
+            st.error("Manual list contains non-integer entries. Use only -1, 0, or 1.")
+            st.stop()
+        if np.any(~np.isin(vals, [-1, 0, 1])):
+            st.error("Manual list may only contain -1, 0, or 1.")
+            st.stop()
+        if len(vals) != H:
+            st.error(f"Manual list length ({len(vals)}) must match number of hinges ({H}).")
+            st.stop()
+        hinge_state = jnp.array(vals, dtype=jnp.int32)
+    else:
+        # Apply one value to all hinges
+        hinge_state = jnp.full((H,), int(default_all), dtype=jnp.int32)
+
+# Show a tiny preview
+st.caption(f"Hinges: {H} — mode: {hinge_mode}")
+
 
 # Run simulation
 if run_btn:
     st.subheader("Simulation Running…")
-    key = jax.random.PRNGKey(1)
-    traj = simulate(
-        key, vertices, faces, edges, hinges, hinge_state,
-        steps=int(steps), dt=float(dt), sigma=float(sigma),
-        theta_gain=float(theta_gain), w_col=float(w_col),
-        proj_steps=int(proj_steps), proj_lr=float(proj_lr)
-    )
+    key = jax.random.PRNGKey(int(sim_seed))  # NEW: seed from sidebar
+    traj = simulate(key, vertices, faces, edges, hinges, hinge_state,
+                steps=int(steps), dt=float(dt), sigma=float(sigma),
+                theta_gain=float(theta_gain), w_col=float(w_col),
+                proj_steps=int(proj_steps), proj_lr=float(proj_lr))
 
     st.success("Done.")
 
