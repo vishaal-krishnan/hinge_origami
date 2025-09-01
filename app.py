@@ -315,6 +315,7 @@ def simulate(key, vertices, faces, edges, hinges, hinge_state,
              steps, dt, sigma, theta_gain, w_col,
              proj_steps, proj_lr,
              theta_0, learned_energy_fn, weights):
+    X0 = jnp.array(vertices)
     metric0 = compute_metric(X0, edges)
     def step(X, key):
         X_new = diffusion_step(X, key, edges, faces, hinges, hinge_state, metric0,
