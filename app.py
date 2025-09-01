@@ -304,7 +304,7 @@ def make_hinge_energy_fn(faces, hinges, state, theta_0, learned_energy_fn, weigh
         return hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
     return energy_fn
 
-hinge_energy_fn = make_hinge_energy_fn(faces, hinges, state, theta_0, learned_energy_fn, weights)
+hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, theta_0, learned_energy_fn, weights)
 hinge_grad = jax.grad(hinge_energy_fn)
 
 def diffusion_step(X, key, edges, faces, hinges, state, metric,
