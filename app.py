@@ -301,32 +301,35 @@ def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, we
 
 
 def make_hinge_energy_fn(faces, hinges, state, theta_0, weights):
-    faces = jnp.asarray(faces, dtype=jnp.int32)
-    hinges = jnp.asarray(hinges, dtype=jnp.int32)
-    state  = jnp.asarray(state,  dtype=jnp.int32)
+    faces   = jnp.asarray(faces,   dtype=jnp.int32)
+    hinges  = jnp.asarray(hinges,  dtype=jnp.int32)
+    state   = jnp.asarray(state,   dtype=jnp.int32)
     weights = jnp.asarray(weights, dtype=jnp.float32)
 
-    # Uses global theta_exp, E_exp (JAX arrays set after file load)
+    # Uses global theta_exp, E_exp, alpha_ref from calibration
     def energy_fn(X):
-        N = face_normals(X, faces)
+        N  = face_normals(X, faces)
         n1 = N[hinges[:, 0]]
         n2 = N[hinges[:, 1]]
 
-        # signed hinge angle (flat sheet convention; sign by z-component of cross)
-        dot = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
+        # signed dihedral (using z-cross convention for 2.5D sheets)
+        dot   = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
         theta = jnp.arccos(dot)
-        sign = jnp.sign(jnp.cross(n1, n2)[:, 2])
-        signed_theta = theta * sign
+        sign  = jnp.sign(jnp.cross(n1, n2)[:, 2])
+        phi   = theta * sign
 
+        # recenter by alpha_ref so state=0 prefers 0
+        phi_shift = phi - alpha_ref
+
+        # model-based target angle
         theta_star = state * theta_0
-        dtheta = signed_theta - theta_star
-        # outward/inward convention: flip mismatch for -1
-        dtheta = jnp.where(state == -1, -dtheta, dtheta)
 
-        # data-driven energy: E(|Δθ|) via jnp.interp
-        d_abs = jnp.abs(dtheta)
-        d_clip = jnp.clip(d_abs, theta_exp[0], theta_exp[-1])  # theta_exp, E_exp are JAX arrays
-        e_vals = jnp.interp(d_clip, theta_exp, E_exp)
+        # distance from target, then absolute for symmetric concave/convex in state=0
+        dtheta = jnp.abs(phi_shift - theta_star)
+
+        # clamp and lookup energy
+        dtheta_clamped = jnp.clip(dtheta, theta_exp[0], theta_exp[-1])
+        e_vals = jnp.interp(dtheta_clamped, theta_exp, E_exp)
 
         return jnp.sum(weights * e_vals)
 
@@ -508,15 +511,28 @@ sort_idx = np.argsort(df['Angle'].values)
 angles = df['Angle'].values[sort_idx] * np.pi / 180.0
 torques = df['Torque'].values[sort_idx]
 spline = UnivariateSpline(angles, torques, s=float(smoothing))
+
 angle_smooth = np.linspace(angles.min(), angles.max(), 500)
 torque_smooth = spline(angle_smooth)
-slope_smooth = spline.derivative()(angle_smooth)
+slope_smooth  = spline.derivative()(angle_smooth)
+
+# Find a neutral angle alpha_ref (zero torque) to recenter about 0
+roots = spline.roots()
+if len(roots) > 0:
+    alpha_ref = float(roots[np.argmin(np.abs(roots))])  # root closest to 0
+else:
+    # fallback: where |torque| is minimal
+    alpha_ref = float(angle_smooth[np.argmin(np.abs(torque_smooth))])
+
+# Integrate energy AFTER optional recenter is decided (not strictly required,
+# but fine to keep as-is; we just use alpha_ref during evaluation)
 energy_smooth = cumulative_trapezoid(torque_smooth, angle_smooth, initial=0.0)
 energy_smooth -= energy_smooth.min()
 
-# expose to JAX lookup
-theta_exp = jnp.array(angle_smooth)
-E_exp     = jnp.array(energy_smooth)
+# expose to JAX lookup (ensure float32 for JAX)
+theta_exp = jnp.array(angle_smooth, dtype=jnp.float32)
+E_exp     = jnp.array(energy_smooth, dtype=jnp.float32)
+alpha_ref = jnp.array(alpha_ref, dtype=jnp.float32)
 
 st.subheader("Calibration Plots")
 st.plotly_chart(
@@ -569,7 +585,7 @@ if run_btn:
     st.subheader("Simulation Running…")
     key = jax.random.PRNGKey(int(sim_seed))  # NEW: seed from sidebar
 
-    theta_0 = 0.0  # or your chosen rest angle magnitude
+    theta_0 = jnp.array(0.0, dtype=jnp.float32)   # or expose in the UI if desired
     weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
 
     hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, theta_0, weights)
