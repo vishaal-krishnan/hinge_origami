@@ -276,29 +276,33 @@ def energy_lookup(theta):
 @jax.jit
 def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, weights):
     N = face_normals(X, faces)
-    n1, n2 = N[hinges[:, 0]], N[hinges[:, 1]]
+    n1 = N[hinges[:, 0]]
+    n2 = N[hinges[:, 1]]
 
+    # Compute signed angles using Z-cross convention
     dot = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
     theta = jnp.arccos(dot)
     cross = jnp.cross(n1, n2)
-    sign = jnp.sign(cross[:, 2])
+    sign = jnp.sign(cross[:, 2])  # For 2.5D sheet
     signed_theta = theta * sign
 
+    # Target angle per hinge
     theta_star = state * theta_0
     dtheta = signed_theta - theta_star
 
-    # Flip based on fold direction
-    flipped_dtheta = jnp.where(state == -1, -dtheta, dtheta)
+    # Flip sign if hinge is -1
+    dtheta = jnp.where(state == -1, -dtheta, dtheta)
 
-    # Evaluate learned energy
-    energy_vals = learned_energy_fn(flipped_dtheta)
-    weighted_energy = weights * energy_vals
-    return jnp.sum(weighted_energy)
+    # Apply learned energy curve to displacement
+    energy_vals = jax.vmap(learned_energy_fn)(dtheta)
+
+    # Optional: apply per-hinge weights
+    return jnp.sum(weights * energy_vals)
 
 hinge_grad = jax.grad(hinge_bending_energy, argnums=0)
 
 def diffusion_step(X, key, edges, faces, hinges, state, metric, dt, theta_gain, sigma, w_col, proj_steps, proj_lr):
-    drift = -theta_gain * hinge_grad(X, faces, hinges, state, 0.0, None, None, None)
+    drift = -theta_gain * hinge_grad(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
     noise = sigma * jax.random.normal(key, X.shape)
     V = drift * dt + noise * jnp.sqrt(dt)
     V_proj = project_isometry(X, V, edges, metric, proj_steps, proj_lr)
