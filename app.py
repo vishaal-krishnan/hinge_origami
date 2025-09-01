@@ -301,7 +301,9 @@ def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, we
 
 hinge_grad = jax.grad(hinge_bending_energy, argnums=0)
 
-def diffusion_step(X, key, edges, faces, hinges, state, metric, dt, theta_gain, sigma, w_col, proj_steps, proj_lr):
+def diffusion_step(X, key, edges, faces, hinges, state, metric,
+                   dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                   theta_0, learned_energy_fn, weights):
     drift = -theta_gain * hinge_grad(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
     noise = sigma * jax.random.normal(key, X.shape)
     V = drift * dt + noise * jnp.sqrt(dt)
@@ -309,12 +311,15 @@ def diffusion_step(X, key, edges, faces, hinges, state, metric, dt, theta_gain, 
     col = w_col * collision_force(X + V_proj) * dt
     return X + V_proj + col
 
-def simulate(key, X0, faces, edges, hinges, hinge_state, steps, dt, sigma, theta_gain, w_col, proj_steps, proj_lr):
+def simulate(key, vertices, faces, edges, hinges, hinge_state,
+             steps, dt, sigma, theta_gain, w_col,
+             proj_steps, proj_lr,
+             theta_0, learned_energy_fn, weights):
     metric0 = compute_metric(X0, edges)
     def step(X, key):
-        key, sub = jax.random.split(key)
-        X_new = diffusion_step(X, sub, edges, faces, hinges, hinge_state, metric0,
-                               dt, theta_gain, sigma, w_col, proj_steps, proj_lr)
+        X_new = diffusion_step(X, key, edges, faces, hinges, hinge_state, metric0,
+                           dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                           theta_0, learned_energy_fn, weights)
         return X_new, X_new
     keys = jax.random.split(key, steps)
     _, traj = jax.lax.scan(step, X0, keys)
@@ -536,10 +541,16 @@ if run_btn:
         theta_clamped = jnp.clip(theta_abs, theta_exp[0], theta_exp[-1])
         return jnp.interp(theta_clamped, theta_exp, E_exp)
 
-    traj = simulate(key, vertices, faces, edges, hinges, hinge_state,
-                steps=int(steps), dt=float(dt), sigma=float(sigma),
-                theta_gain=float(theta_gain), w_col=float(w_col),
-                proj_steps=int(proj_steps), proj_lr=float(proj_lr))
+    traj = simulate(
+        key, vertices, faces, edges, hinges, hinge_state,
+        steps=int(steps), dt=float(dt), sigma=float(sigma),
+        theta_gain=float(theta_gain), w_col=float(w_col),
+        proj_steps=int(proj_steps), proj_lr=float(proj_lr),
+        theta_0=theta_0,
+        learned_energy_fn=learned_energy_fn,
+        weights=weights,
+    )
+
 
     st.success("Done.")
 
