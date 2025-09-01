@@ -273,18 +273,47 @@ def energy_lookup(theta):
     theta_clamped = jnp.clip(theta_abs, theta_exp[0], theta_exp[-1])
     return jnp.interp(theta_clamped, theta_exp, E_exp)
 
-def hinge_bending_energy(X, faces, hinges, state, theta_0=0.0, k_lo=None, k_hi=None, k0=None):
+def hinge_bending_energy_learned(X, faces, hinges, state, theta_0, learned_energy_fn):
+    """
+    Compute hinge bending energy using a learned energy function instead of quadratic potential.
+
+    Parameters:
+        X : (V, 3) vertex positions
+        faces : (F, 3) face indices
+        hinges : (H, 2) face pairs
+        state : (H,) in {-1, 0, +1} specifying desired fold direction
+        theta_0 : target fold angle (float)
+        learned_energy_fn : callable that maps (angle,) → energy
+
+    Returns:
+        total energy (scalar)
+    """
     N = face_normals(X, faces)
     n1, n2 = N[hinges[:, 0]], N[hinges[:, 1]]
+
+    # Unsigned angle
     dot = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
     theta = jnp.arccos(dot)
+
+    # Sign from Z-component of cross product (2.5D convention)
     cross = jnp.cross(n1, n2)
     sign = jnp.sign(cross[:, 2])
     signed_theta = theta * sign
-    theta_star = state * theta_0  # kept for API compatibility; set theta_0=0 for identical hinges
+
+    # Target angle (same sign as state)
+    theta_star = state * theta_0
+
+    # Difference from target
     dtheta = signed_theta - theta_star
-    energies = energy_lookup(dtheta)
-    return jnp.sum(energies)
+
+    # Determine soft/stiff behavior based on whether fold follows the state
+    follows_state = jnp.sign(dtheta) == jnp.sign(state)
+    weights = jnp.where(state == 0, 1.0, jnp.where(follows_state, 0.5, 1.0))
+
+    # Apply learned energy
+    energy = learned_energy_fn(signed_theta)
+
+    return jnp.sum(weights * energy)
 
 hinge_grad = jax.grad(hinge_bending_energy, argnums=0)
 
