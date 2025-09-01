@@ -527,6 +527,15 @@ st.caption(f"Hinges: {H} — mode: {hinge_mode}")
 if run_btn:
     st.subheader("Simulation Running…")
     key = jax.random.PRNGKey(int(sim_seed))  # NEW: seed from sidebar
+
+    theta_0 = 0.0
+    weights = jnp.ones(hinges.shape[0])
+
+    def learned_energy_fn(theta):
+        theta_abs = jnp.abs(theta)
+        theta_clamped = jnp.clip(theta_abs, theta_exp[0], theta_exp[-1])
+        return jnp.interp(theta_clamped, theta_exp, E_exp)
+
     traj = simulate(key, vertices, faces, edges, hinges, hinge_state,
                 steps=int(steps), dt=float(dt), sigma=float(sigma),
                 theta_gain=float(theta_gain), w_col=float(w_col),
