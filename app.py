@@ -299,17 +299,42 @@ def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, we
     # Optional: apply per-hinge weights
     return jnp.sum(weights * energy_vals)
 
-def make_hinge_energy_fn(faces, hinges, state, theta_0, learned_energy_fn, weights):
+
+def make_hinge_energy_fn(faces, hinges, state, theta_0, weights):
+    faces = jnp.asarray(faces, dtype=jnp.int32)
+    hinges = jnp.asarray(hinges, dtype=jnp.int32)
+    state  = jnp.asarray(state,  dtype=jnp.int32)
+    weights = jnp.asarray(weights, dtype=jnp.float32)
+
+    # Uses global theta_exp, E_exp (JAX arrays set after file load)
     def energy_fn(X):
-        return hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
+        N = face_normals(X, faces)
+        n1 = N[hinges[:, 0]]
+        n2 = N[hinges[:, 1]]
+
+        # signed hinge angle (flat sheet convention; sign by z-component of cross)
+        dot = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
+        theta = jnp.arccos(dot)
+        sign = jnp.sign(jnp.cross(n1, n2)[:, 2])
+        signed_theta = theta * sign
+
+        theta_star = state * theta_0
+        dtheta = signed_theta - theta_star
+        # outward/inward convention: flip mismatch for -1
+        dtheta = jnp.where(state == -1, -dtheta, dtheta)
+
+        # data-driven energy: E(|Δθ|) via jnp.interp
+        d_abs = jnp.abs(dtheta)
+        d_clip = jnp.clip(d_abs, theta_exp[0], theta_exp[-1])  # theta_exp, E_exp are JAX arrays
+        e_vals = jnp.interp(d_clip, theta_exp, E_exp)
+
+        return jnp.sum(weights * e_vals)
+
     return energy_fn
 
-hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, theta_0, learned_energy_fn, weights)
-hinge_grad = jax.grad(hinge_energy_fn)
 
 def diffusion_step(X, key, edges, faces, hinges, state, metric,
-                   dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
-                   theta_0, learned_energy_fn, weights):
+                   dt, theta_gain, sigma, w_col, proj_steps, proj_lr):
     drift = -theta_gain * hinge_grad(X)
     noise = sigma * jax.random.normal(key, X.shape)
     V = drift * dt + noise * jnp.sqrt(dt)
@@ -317,20 +342,24 @@ def diffusion_step(X, key, edges, faces, hinges, state, metric,
     col = w_col * collision_force(X + V_proj) * dt
     return X + V_proj + col
 
+
 def simulate(key, vertices, faces, edges, hinges, hinge_state,
              steps, dt, sigma, theta_gain, w_col,
-             proj_steps, proj_lr,
-             theta_0, learned_energy_fn, weights):
+             proj_steps, proj_lr):
     X0 = jnp.array(vertices)
+    edges = jnp.asarray(edges, dtype=jnp.int32)  # ensure int array
     metric0 = compute_metric(X0, edges)
+
     def step(X, key):
-        X_new = diffusion_step(X, key, edges, faces, hinges, hinge_state, metric0,
-                           dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
-                           theta_0, learned_energy_fn, weights)
+        key, sub = jax.random.split(key)
+        X_new = diffusion_step(X, sub, edges, faces, hinges, hinge_state, metric0,
+                               dt, theta_gain, sigma, w_col, proj_steps, proj_lr)
         return X_new, X_new
+
     keys = jax.random.split(key, steps)
     _, traj = jax.lax.scan(step, X0, keys)
     return jnp.concatenate([X0[None], traj], axis=0)
+
 
 # -----------------------
 # Plot helpers
@@ -497,7 +526,7 @@ st.plotly_chart(
 
 # --- Build mesh, edges, hinges ---
 vertices, faces = create_mesh(radius=int(radius))
-edges = jnp.array(compute_edges(faces))
+edges = jnp.array(compute_edges(faces), dtype=jnp.int32)
 hinges = build_hinge_graph(faces)
 
 
@@ -540,22 +569,17 @@ if run_btn:
     st.subheader("Simulation Running…")
     key = jax.random.PRNGKey(int(sim_seed))  # NEW: seed from sidebar
 
-    theta_0 = 0.0
-    weights = jnp.ones(hinges.shape[0])
+    theta_0 = 0.0  # or your chosen rest angle magnitude
+    weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
 
-    def learned_energy_fn(theta):
-        theta_abs = jnp.abs(theta)
-        theta_clamped = jnp.clip(theta_abs, theta_exp[0], theta_exp[-1])
-        return jnp.interp(theta_clamped, theta_exp, E_exp)
+    hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, theta_0, weights)
+    hinge_grad = jax.grad(hinge_energy_fn)
 
     traj = simulate(
         key, vertices, faces, edges, hinges, hinge_state,
         steps=int(steps), dt=float(dt), sigma=float(sigma),
         theta_gain=float(theta_gain), w_col=float(w_col),
         proj_steps=int(proj_steps), proj_lr=float(proj_lr),
-        theta_0=theta_0,
-        learned_energy_fn=learned_energy_fn,
-        weights=weights,
     )
 
 
