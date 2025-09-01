@@ -299,12 +299,18 @@ def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, we
     # Optional: apply per-hinge weights
     return jnp.sum(weights * energy_vals)
 
-hinge_grad = jax.grad(hinge_bending_energy, argnums=0)
+def make_hinge_energy_fn(faces, hinges, state, theta_0, learned_energy_fn, weights):
+    def energy_fn(X):
+        return hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
+    return energy_fn
+
+hinge_energy_fn = make_hinge_energy_fn(faces, hinges, state, theta_0, learned_energy_fn, weights)
+hinge_grad = jax.grad(hinge_energy_fn)
 
 def diffusion_step(X, key, edges, faces, hinges, state, metric,
                    dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
                    theta_0, learned_energy_fn, weights):
-    drift = -theta_gain * hinge_grad(X, faces, hinges, state, theta_0, learned_energy_fn, weights)
+    drift = -theta_gain * hinge_grad(X)
     noise = sigma * jax.random.normal(key, X.shape)
     V = drift * dt + noise * jnp.sqrt(dt)
     V_proj = project_isometry(X, V, edges, metric, proj_steps, proj_lr)
