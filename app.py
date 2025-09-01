@@ -274,8 +274,8 @@ def energy_lookup(theta):
     return jnp.interp(theta_clamped, theta_exp, E_exp)
 
 @jax.jit
-def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn):
-    N = face_normals(X, faces)  # JAX version
+def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn, weights):
+    N = face_normals(X, faces)
     n1, n2 = N[hinges[:, 0]], N[hinges[:, 1]]
 
     dot = jnp.clip(jnp.sum(n1 * n2, axis=1), -1.0, 1.0)
@@ -286,11 +286,14 @@ def hinge_bending_energy(X, faces, hinges, state, theta_0, learned_energy_fn):
 
     theta_star = state * theta_0
     dtheta = signed_theta - theta_star
-    follows = jnp.sign(dtheta) == jnp.sign(state)
-    weights = jnp.where(state == 0, 1.0, jnp.where(follows, 0.5, 1.0))
 
-    energy = learned_energy_fn(signed_theta)  # Must be pure JAX
-    return jnp.sum(weights * energy)
+    # Flip based on fold direction
+    flipped_dtheta = jnp.where(state == -1, -dtheta, dtheta)
+
+    # Evaluate learned energy
+    energy_vals = learned_energy_fn(flipped_dtheta)
+    weighted_energy = weights * energy_vals
+    return jnp.sum(weighted_energy)
 
 hinge_grad = jax.grad(hinge_bending_energy, argnums=0)
 
