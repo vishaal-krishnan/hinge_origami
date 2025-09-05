@@ -84,12 +84,17 @@ def make_hinge_energy_fn(faces, hinges, state, weights, learned_energy_fn):
     return energy_fn
 
 
+def compute_deterministic_force(X, hinge_grad, theta_gain):
+    """Compute deterministic force (drift term)."""
+    return -theta_gain * hinge_grad(X)
+
+
 def diffusion_step_euler(X, key, edges, faces, metric,
                         dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
                         hinge_grad):
     """Single step using Euler method (1st order)."""
     # Drift from gradient of total hinge energy
-    drift = -theta_gain * hinge_grad(X)             # (N,3)
+    drift = compute_deterministic_force(X, hinge_grad, theta_gain)
     
     # Noise
     noise = sigma * jax.random.normal(key, X.shape)
@@ -111,22 +116,89 @@ def diffusion_step_heun(X, key, edges, faces, metric,
     noise = sigma * jax.random.normal(key1, X.shape)
     
     # Predictor step (Euler)
-    drift1 = -theta_gain * hinge_grad(X)
+    drift1 = compute_deterministic_force(X, hinge_grad, theta_gain)
     V1 = drift1 * dt + noise * jnp.sqrt(dt)
     V1_proj, _ = project_constraints(X, V1, edges, metric, w_col, proj_steps, proj_lr)
     X_pred = X + V1_proj
     
     # Corrector step
-    drift2 = -theta_gain * hinge_grad(X_pred)
+    drift2 = compute_deterministic_force(X_pred, hinge_grad, theta_gain)
     V2 = 0.5 * (drift1 + drift2) * dt + noise * jnp.sqrt(dt)
     V2_proj, constraint_losses = project_constraints(X, V2, edges, metric, w_col, proj_steps, proj_lr)
     
     return X + V2_proj
 
 
+def diffusion_step_rk4(X, key, edges, faces, metric,
+                      dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                      hinge_grad):
+    """Single step using Runge-Kutta 4th order (4th order accuracy for deterministic part)."""
+    keys = jax.random.split(key, 4)
+    
+    # Noise (same for all stages)
+    noise = sigma * jax.random.normal(keys[0], X.shape) * jnp.sqrt(dt)
+    
+    # RK4 stages for deterministic part
+    k1 = compute_deterministic_force(X, hinge_grad, theta_gain)
+    
+    # Stage 2: midpoint with k1
+    V1 = k1 * dt/2
+    V1_proj, _ = project_constraints(X, V1, edges, metric, w_col, proj_steps//4, proj_lr)
+    X1 = X + V1_proj
+    k2 = compute_deterministic_force(X1, hinge_grad, theta_gain)
+    
+    # Stage 3: midpoint with k2  
+    V2 = k2 * dt/2
+    V2_proj, _ = project_constraints(X, V2, edges, metric, w_col, proj_steps//4, proj_lr)
+    X2 = X + V2_proj
+    k3 = compute_deterministic_force(X2, hinge_grad, theta_gain)
+    
+    # Stage 4: endpoint with k3
+    V3 = k3 * dt
+    V3_proj, _ = project_constraints(X, V3, edges, metric, w_col, proj_steps//4, proj_lr)
+    X3 = X + V3_proj
+    k4 = compute_deterministic_force(X3, hinge_grad, theta_gain)
+    
+    # Combine RK4 stages
+    drift_rk4 = (k1 + 2*k2 + 2*k3 + k4) / 6
+    V_total = drift_rk4 * dt + noise
+    
+    # Final constraint projection
+    V_proj, constraint_losses = project_constraints(X, V_total, edges, metric, w_col, proj_steps, proj_lr)
+    
+    return X + V_proj
+
+
+def diffusion_step_adaptive(X, key, edges, faces, metric,
+                           dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                           hinge_grad, tol=1e-4):
+    """Adaptive time stepping with error control."""
+    key1, key2 = jax.random.split(key)
+    
+    # Take one full step
+    X_full = diffusion_step_heun(X, key1, edges, faces, metric,
+                                dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                                hinge_grad)
+    
+    # Take two half steps
+    X_half1 = diffusion_step_heun(X, key1, edges, faces, metric,
+                                 dt/2, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                                 hinge_grad)
+    X_half2 = diffusion_step_heun(X_half1, key2, edges, faces, metric,
+                                 dt/2, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                                 hinge_grad)
+    
+    # Estimate error
+    error = jnp.linalg.norm(X_full - X_half2)
+    
+    # Use the more accurate two-step result
+    # In practice, you'd adjust dt based on error, but for simplicity we just return the better result
+    return X_half2, error
+
+
 def diffusion_step(X, key, edges, faces, metric,
                    dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
-                   hinge_grad, method='heun'):
+                   hinge_grad, method='rk4'):
     """Single step of the diffusion dynamics with choice of integration method."""
     if method == 'euler':
         return diffusion_step_euler(X, key, edges, faces, metric,
@@ -136,6 +208,15 @@ def diffusion_step(X, key, edges, faces, metric,
         return diffusion_step_heun(X, key, edges, faces, metric,
                                   dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
                                   hinge_grad)
+    elif method == 'rk4':
+        return diffusion_step_rk4(X, key, edges, faces, metric,
+                                 dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                                 hinge_grad)
+    elif method == 'adaptive':
+        result = diffusion_step_adaptive(X, key, edges, faces, metric,
+                                       dt, theta_gain, sigma, w_col, proj_steps, proj_lr,
+                                       hinge_grad)
+        return result[0]  # Return just the position, ignore error for now
     else:
         raise ValueError(f"Unknown integration method: {method}")
 
@@ -143,7 +224,7 @@ def diffusion_step(X, key, edges, faces, metric,
 def simulate(key, vertices, faces, edges, hinges, hinge_state,
              steps, dt, sigma, theta_gain, w_col,
              proj_steps, proj_lr,
-             hinge_grad, method='heun'):
+             hinge_grad, method='rk4'):
     """Run the full simulation."""
     X0 = jnp.array(vertices)
     metric0 = compute_metric(X0, edges)
