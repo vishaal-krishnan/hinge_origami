@@ -68,6 +68,8 @@ proj_steps = st.sidebar.number_input("Isometry proj steps", 0, 1000, 50, 10)
 proj_lr = st.sidebar.number_input("Isometry proj lr", 1e-5, 1e-1, 1e-2, 1e-3, format="%.5f")
 radius = st.sidebar.number_input("Hex radius (tiles)", 0, 3, 0, 1)
 
+integration_method = st.sidebar.selectbox("Integration method", ["heun", "euler"], index=0)
+
 sim_seed = st.sidebar.number_input("Seed (simulation noise)", value=1, step=1)
 run_btn = st.sidebar.button("Run Simulation")
 
@@ -149,6 +151,7 @@ if run_btn:
         theta_gain=float(theta_gain), w_col=float(w_col),
         proj_steps=int(proj_steps), proj_lr=float(proj_lr),
         hinge_grad=hinge_grad,
+        method=integration_method
     )
     st.success("Done.")
 
