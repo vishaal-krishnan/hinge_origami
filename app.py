@@ -418,6 +418,9 @@ if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
     </head>
     <body>
         <h1>Configuration Analysis Report</h1>
+        
+        <h2>Input Parameters</h2>
+        <p><strong>Input Hinge State Pattern:</strong> <span class="state">{", ".join([f"{s:+d}" for s in hinge_state])}</span></p>
         <p><strong>Total Simulations:</strong> {n_sims_int}</p>
         <p><strong>Unique Configurations:</strong> {len(unique_groups)}</p>
         <p><strong>Fold State Classification:</strong> +1=Outward, 0=Flat (±{threshold_decimal*100:.0f}%), -1=Inward</p>
@@ -502,6 +505,9 @@ if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
     pdf_text_report = f"""Configuration Analysis Report
 {'='*50}
 
+INPUT PARAMETERS
+{'='*50}
+Input Hinge State Pattern: {", ".join([f"{s:+d}" for s in hinge_state])}
 Total Simulations: {n_sims_int}
 Unique Configurations: {len(unique_groups)}
 Fold State Classification: +1=Outward, 0=Flat (±{threshold_decimal*100:.0f}%), -1=Inward
