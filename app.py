@@ -79,6 +79,7 @@ run_btn = st.sidebar.button("Run Simulation")
 # Configuration analysis
 st.sidebar.header("4) Configuration Analysis")
 n_sims = st.sidebar.number_input("Number of simulations", 10, 500, 100, 10, help="Number of simulations to run for configuration analysis")
+flat_threshold_pct = st.sidebar.number_input("Flat threshold (%)", 1.0, 50.0, 10.0, 1.0, help="Percentage threshold around 180° to classify as flat (e.g., 10% means 162°-198° is flat)")
 analyze_btn = st.sidebar.button("Run Configuration Analysis", help="Run multiple simulations with different seeds to identify unique fold configurations (accounting for symmetries)")
 
 # -----------------------
@@ -216,9 +217,9 @@ def normalize_angles_to_degrees(angles):
     """Convert angles to degrees in [0, 360) range."""
     return np.mod(np.degrees(angles), 360.0)
 
-def angles_to_state_vector(angles_deg):
+def angles_to_state_vector(angles_deg, threshold_percent=0.1):
     """Convert angle array to discrete state vector [-1, 0, +1]."""
-    return np.array([classify_fold_direction(a) for a in angles_deg], dtype=int)
+    return np.array([classify_fold_direction(a, threshold_percent=threshold_percent) for a in angles_deg], dtype=int)
 
 def get_canonical_form(state_vector):
     """
@@ -264,67 +265,96 @@ def group_configurations(all_state_vectors):
     # Convert to list of tuples
     return [(np.array(canonical), indices) for canonical, indices in canonical_to_indices.items()]
 
+# Store analysis results in session state to prevent reset on download
 if analyze_btn:
     n_sims_int = int(n_sims)
+    threshold_decimal = flat_threshold_pct / 100.0
+    
+    st.session_state['run_analysis'] = True
+    st.session_state['n_sims_int'] = n_sims_int
+    st.session_state['threshold_decimal'] = threshold_decimal
+    # Clear previous results to force recomputation
+    if 'analysis_results' in st.session_state:
+        del st.session_state['analysis_results']
+
+if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
+    n_sims_int = st.session_state['n_sims_int']
+    threshold_decimal = st.session_state['threshold_decimal']
+    
     st.header(f"📊 Configuration Analysis ({n_sims_int} Simulations)")
     
-    # Per-hinge weights (uniform for now)
-    weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
-    
-    # Build total energy function
-    hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, weights, learned_energy_fn)
-    hinge_grad = jax.grad(hinge_energy_fn)
-    
-    # Run simulations
-    st.info(f"Running {n_sims_int} simulations with seeds 1-{n_sims_int}...")
-    progress_bar = st.progress(0)
-    
-    all_final_states = []
-    all_state_vectors = []
-    
-    for seed_idx in range(1, n_sims_int + 1):
-        # Update progress
-        progress_bar.progress(seed_idx / n_sims_int)
+    # Only run simulations if not already computed
+    if 'analysis_results' not in st.session_state:
+        # Per-hinge weights (uniform for now)
+        weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
         
-        # Run simulation
-        key = jax.random.PRNGKey(seed_idx)
-        traj = simulate(
-            key, vertices, faces, edges, hinges, hinge_state,
-            steps=int(steps), dt=float(dt), sigma=float(sigma),
-            theta_gain=float(theta_gain), w_col=float(w_col),
-            proj_steps=int(proj_steps), proj_lr=float(proj_lr),
-            hinge_grad=hinge_grad,
-            method=integration_method
-        )
+        # Build total energy function
+        hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, weights, learned_energy_fn)
+        hinge_grad = jax.grad(hinge_energy_fn)
         
-        # Get final state
-        X_final = np.asarray(traj[-1])
+        # Run simulations
+        st.info(f"Running {n_sims_int} simulations with seeds 1-{n_sims_int}...")
+        progress_bar = st.progress(0)
         
-        # Compute angles (use robust method to get consistent ordering)
-        angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
-        angles_deg = normalize_angles_to_degrees(angles_0_2pi)
+        all_final_states = []
+        all_state_vectors = []
         
-        # Convert to discrete state vector
-        state_vec = angles_to_state_vector(angles_deg)
+        for seed_idx in range(1, n_sims_int + 1):
+            # Update progress
+            progress_bar.progress(seed_idx / n_sims_int)
+            
+            # Run simulation
+            key = jax.random.PRNGKey(seed_idx)
+            traj = simulate(
+                key, vertices, faces, edges, hinges, hinge_state,
+                steps=int(steps), dt=float(dt), sigma=float(sigma),
+                theta_gain=float(theta_gain), w_col=float(w_col),
+                proj_steps=int(proj_steps), proj_lr=float(proj_lr),
+                hinge_grad=hinge_grad,
+                method=integration_method
+            )
+            
+            # Get final state
+            X_final = np.asarray(traj[-1])
+            
+            # Compute angles (use robust method to get consistent ordering)
+            angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
+            angles_deg = normalize_angles_to_degrees(angles_0_2pi)
+            
+            # Convert to discrete state vector
+            state_vec = angles_to_state_vector(angles_deg, threshold_percent=threshold_decimal)
+            
+            all_final_states.append(X_final)
+            all_state_vectors.append(state_vec)
         
-        all_final_states.append(X_final)
-        all_state_vectors.append(state_vec)
-    
-    progress_bar.empty()
-    st.success(f"✅ Completed {n_sims_int} simulations!")
-    
-    # Group configurations by canonical form (with symmetries)
-    st.info("Grouping unique configurations (accounting for cyclic and sign-flip symmetries)...")
-    unique_groups = group_configurations(all_state_vectors)
-    
-    # Sort by frequency (most common first)
-    unique_groups.sort(key=lambda x: len(x[1]), reverse=True)
-    
-    st.success(f"✅ Found {len(unique_groups)} unique configurations!")
+        progress_bar.empty()
+        st.success(f"✅ Completed {n_sims_int} simulations!")
+        
+        # Group configurations by canonical form (with symmetries)
+        st.info("Grouping unique configurations (accounting for cyclic and sign-flip symmetries)...")
+        unique_groups = group_configurations(all_state_vectors)
+        
+        # Sort by frequency (most common first)
+        unique_groups.sort(key=lambda x: len(x[1]), reverse=True)
+        
+        st.success(f"✅ Found {len(unique_groups)} unique configurations!")
+        
+        # Store results in session state
+        st.session_state['analysis_results'] = {
+            'all_final_states': all_final_states,
+            'unique_groups': unique_groups,
+            'n_sims_int': n_sims_int,
+            'threshold_decimal': threshold_decimal
+        }
+    else:
+        # Load from session state
+        all_final_states = st.session_state['analysis_results']['all_final_states']
+        unique_groups = st.session_state['analysis_results']['unique_groups']
+        st.success(f"✅ Found {len(unique_groups)} unique configurations!")
     
     # Display results
     st.subheader(f"Unique Configurations (Total: {len(unique_groups)})")
-    st.caption("Fold states: +1=Outward, 0=Flat (±10%), -1=Inward")
+    st.caption(f"Fold states: +1=Outward, 0=Flat (±{threshold_decimal*100:.0f}%), -1=Inward")
     
     # Display each configuration
     for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
@@ -349,13 +379,6 @@ if analyze_btn:
             st.markdown("**🔢 Statistics**")
             count = len(sim_indices)
             st.metric("Occurrences", f"{count} / {n_sims_int}")
-            
-            # Show which seeds produced this config
-            with st.expander("Seeds"):
-                seeds_str = ", ".join([str(i+1) for i in sim_indices[:20]])
-                if len(sim_indices) > 20:
-                    seeds_str += f"... (+{len(sim_indices)-20} more)"
-                st.text(seeds_str)
         
         with col2:
             st.markdown("**🎨 3D Visualization (Representative)**")
@@ -397,7 +420,7 @@ if analyze_btn:
         <h1>Configuration Analysis Report</h1>
         <p><strong>Total Simulations:</strong> {n_sims_int}</p>
         <p><strong>Unique Configurations:</strong> {len(unique_groups)}</p>
-        <p><strong>Fold State Classification:</strong> +1=Outward, 0=Flat (±10%), -1=Inward</p>
+        <p><strong>Fold State Classification:</strong> +1=Outward, 0=Flat (±{threshold_decimal*100:.0f}%), -1=Inward</p>
         
         <h2>Summary Table</h2>
         <table>
@@ -448,8 +471,7 @@ if analyze_btn:
                     <td style="width: 50%; vertical-align: top; border: none;">
                         <div class="state">{state_str}</div>
                         <div class="stats">
-                            <strong>Occurrences:</strong> {count} / {n_sims_int}<br>
-                            <strong>Seeds:</strong> {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
+                            <strong>Occurrences:</strong> {count} / {n_sims_int}
                         </div>
                         <p><strong>Hinge Details:</strong></p>
                         <ul>
@@ -482,7 +504,7 @@ if analyze_btn:
 
 Total Simulations: {n_sims_int}
 Unique Configurations: {len(unique_groups)}
-Fold State Classification: +1=Outward, 0=Flat (±10%), -1=Inward
+Fold State Classification: +1=Outward, 0=Flat (±{threshold_decimal*100:.0f}%), -1=Inward
 
 {'='*50}
 SUMMARY
@@ -496,7 +518,6 @@ SUMMARY
         pdf_text_report += f"""Configuration #{config_idx + 1}
 Fold State Pattern: {state_str}
 Occurrences: {count} / {n_sims_int}
-Seeds: {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
 
 """
     
