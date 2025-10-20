@@ -78,7 +78,8 @@ run_btn = st.sidebar.button("Run Simulation")
 
 # Configuration analysis
 st.sidebar.header("4) Configuration Analysis")
-analyze_btn = st.sidebar.button("Run 100 Simulations & Analyze Configs", help="Run 100 simulations with different seeds to identify unique fold configurations (accounting for symmetries)")
+n_sims = st.sidebar.number_input("Number of simulations", 10, 500, 100, 10, help="Number of simulations to run for configuration analysis")
+analyze_btn = st.sidebar.button("Run Configuration Analysis", help="Run multiple simulations with different seeds to identify unique fold configurations (accounting for symmetries)")
 
 # -----------------------
 # Data Loading and Processing
@@ -264,7 +265,8 @@ def group_configurations(all_state_vectors):
     return [(np.array(canonical), indices) for canonical, indices in canonical_to_indices.items()]
 
 if analyze_btn:
-    st.header("📊 Configuration Analysis (100 Simulations)")
+    n_sims_int = int(n_sims)
+    st.header(f"📊 Configuration Analysis ({n_sims_int} Simulations)")
     
     # Per-hinge weights (uniform for now)
     weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
@@ -273,16 +275,16 @@ if analyze_btn:
     hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, weights, learned_energy_fn)
     hinge_grad = jax.grad(hinge_energy_fn)
     
-    # Run 100 simulations
-    st.info("Running 100 simulations with seeds 1-100...")
+    # Run simulations
+    st.info(f"Running {n_sims_int} simulations with seeds 1-{n_sims_int}...")
     progress_bar = st.progress(0)
     
     all_final_states = []
     all_state_vectors = []
     
-    for seed_idx in range(1, 101):
+    for seed_idx in range(1, n_sims_int + 1):
         # Update progress
-        progress_bar.progress(seed_idx / 100)
+        progress_bar.progress(seed_idx / n_sims_int)
         
         # Run simulation
         key = jax.random.PRNGKey(seed_idx)
@@ -309,7 +311,7 @@ if analyze_btn:
         all_state_vectors.append(state_vec)
     
     progress_bar.empty()
-    st.success("✅ Completed 100 simulations!")
+    st.success(f"✅ Completed {n_sims_int} simulations!")
     
     # Group configurations by canonical form (with symmetries)
     st.info("Grouping unique configurations (accounting for cyclic and sign-flip symmetries)...")
@@ -346,9 +348,7 @@ if analyze_btn:
             
             st.markdown("**🔢 Statistics**")
             count = len(sim_indices)
-            percentage = (count / 100.0) * 100
-            st.metric("Occurrences", f"{count} / 100")
-            st.metric("Percentage", f"{percentage:.1f}%")
+            st.metric("Occurrences", f"{count} / {n_sims_int}")
             
             # Show which seeds produced this config
             with st.expander("Seeds"):
@@ -370,3 +370,130 @@ if analyze_btn:
             config_fig = plot_hinge_angles(X_repr, faces_oriented_repr, hinges_ordered_repr, angles_repr)
             config_fig.update_layout(height=400, width=600)
             st.plotly_chart(config_fig, use_container_width=True)
+    
+    # Download section
+    st.markdown("---")
+    st.subheader("📥 Download Results")
+    
+    # Generate HTML report
+    html_report = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Configuration Analysis Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1 {{ color: #333; }}
+            h2 {{ color: #666; margin-top: 30px; }}
+            .config {{ border: 1px solid #ddd; padding: 15px; margin: 20px 0; border-radius: 5px; }}
+            .state {{ background: #f0f0f0; padding: 10px; font-family: monospace; }}
+            .stats {{ margin: 10px 0; }}
+            table {{ border-collapse: collapse; width: 100%; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #4CAF50; color: white; }}
+        </style>
+    </head>
+    <body>
+        <h1>Configuration Analysis Report</h1>
+        <p><strong>Total Simulations:</strong> {n_sims_int}</p>
+        <p><strong>Unique Configurations:</strong> {len(unique_groups)}</p>
+        <p><strong>Fold State Classification:</strong> +1=Outward, 0=Flat (±10%), -1=Inward</p>
+        
+        <h2>Summary Table</h2>
+        <table>
+            <tr>
+                <th>Config #</th>
+                <th>Fold State Pattern</th>
+                <th>Occurrences</th>
+            </tr>
+    """
+    
+    for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
+        state_str = ", ".join([f"{s:+d}" for s in canonical_state])
+        count = len(sim_indices)
+        html_report += f"""
+            <tr>
+                <td>{config_idx + 1}</td>
+                <td class="state">{state_str}</td>
+                <td>{count} / {n_sims_int}</td>
+            </tr>
+        """
+    
+    html_report += """
+        </table>
+        
+        <h2>Detailed Configurations</h2>
+    """
+    
+    for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
+        state_str = ", ".join([f"{s:+d}" for s in canonical_state])
+        count = len(sim_indices)
+        state_symbols = {-1: "⬇ Inward", 0: "➖ Flat", 1: "⬆ Outward"}
+        
+        html_report += f"""
+        <div class="config">
+            <h3>Configuration #{config_idx + 1}</h3>
+            <div class="state">{state_str}</div>
+            <div class="stats">
+                <strong>Occurrences:</strong> {count} / {n_sims_int}<br>
+                <strong>Seeds:</strong> {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
+            </div>
+            <p><strong>Hinge Details:</strong></p>
+            <ul>
+        """
+        
+        for i, s in enumerate(canonical_state):
+            html_report += f"<li>Hinge {i+1}: {state_symbols[s]}</li>"
+        
+        html_report += """
+            </ul>
+        </div>
+        """
+    
+    html_report += """
+    </body>
+    </html>
+    """
+    
+    # Download buttons
+    col_html, col_pdf = st.columns(2)
+    
+    with col_html:
+        st.download_button(
+            label="📄 Download HTML Report",
+            data=html_report,
+            file_name="configuration_analysis.html",
+            mime="text/html"
+        )
+    
+    with col_pdf:
+        # For PDF, we'll create a text-based report since generating actual PDFs requires additional libraries
+        pdf_text_report = f"""Configuration Analysis Report
+{'='*50}
+
+Total Simulations: {n_sims_int}
+Unique Configurations: {len(unique_groups)}
+Fold State Classification: +1=Outward, 0=Flat (±10%), -1=Inward
+
+{'='*50}
+SUMMARY
+{'='*50}
+
+"""
+        
+        for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
+            state_str = ", ".join([f"{s:+d}" for s in canonical_state])
+            count = len(sim_indices)
+            pdf_text_report += f"""Configuration #{config_idx + 1}
+Fold State Pattern: {state_str}
+Occurrences: {count} / {n_sims_int}
+Seeds: {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
+
+"""
+        
+        st.download_button(
+            label="📑 Download Text Report (PDF-compatible)",
+            data=pdf_text_report,
+            file_name="configuration_analysis.txt",
+            mime="text/plain"
+        )
