@@ -78,8 +78,7 @@ run_btn = st.sidebar.button("Run Simulation")
 
 # Configuration analysis
 st.sidebar.header("4) Configuration Analysis")
-analyze_btn = st.sidebar.button("Run 100 Simulations & Analyze Configs", help="Run 100 simulations with different seeds to identify unique final configurations")
-angle_tolerance = st.sidebar.number_input("Angle tolerance (degrees)", 1.0, 10.0, 2.0, 0.5, help="Tolerance for grouping similar configurations")
+analyze_btn = st.sidebar.button("Run 100 Simulations & Analyze Configs", help="Run 100 simulations with different seeds to identify unique fold configurations (accounting for symmetries)")
 
 # -----------------------
 # Data Loading and Processing
@@ -133,7 +132,7 @@ else:
     hinge_state, error_msg = create_manual_states(H, default_all, manual_text)
     if error_msg:
         st.error(error_msg)
-            st.stop()
+        st.stop()
 
 # Show preview
 st.caption(f"Hinges: {H} — mode: {hinge_mode}")
@@ -191,46 +190,78 @@ else:
 # Configuration Analysis (100 simulations)
 # -----------------------
 
+def classify_fold_direction(angle_deg, flat_angle=180.0, threshold_percent=0.1):
+    """
+    Classify fold direction based on angle.
+    
+    Args:
+        angle_deg: Angle in degrees (0-360)
+        flat_angle: Reference flat angle (default 180°)
+        threshold_percent: Percentage threshold for flat (default 10%)
+    
+    Returns:
+        +1 for outward fold, 0 for flat, -1 for inward fold
+    """
+    threshold = flat_angle * threshold_percent
+    
+    if angle_deg > flat_angle + threshold:
+        return 1  # Outward
+    elif angle_deg < flat_angle - threshold:
+        return -1  # Inward
+    else:
+        return 0  # Flat
+
 def normalize_angles_to_degrees(angles):
     """Convert angles to degrees in [0, 360) range."""
     return np.mod(np.degrees(angles), 360.0)
 
-def are_cyclic_permutations(config1, config2, tolerance_deg=2.0):
-    """Check if two configurations are cyclic permutations of each other."""
-    n = len(config1)
-    if len(config2) != n:
-        return False
-    
-    # Try all possible rotations
-    for shift in range(n):
-        rotated = np.roll(config2, shift)
-        if np.allclose(config1, rotated, atol=tolerance_deg):
-            return True
-    return False
+def angles_to_state_vector(angles_deg):
+    """Convert angle array to discrete state vector [-1, 0, +1]."""
+    return np.array([classify_fold_direction(a) for a in angles_deg], dtype=int)
 
-def group_configurations(all_configs, tolerance_deg=2.0):
+def get_canonical_form(state_vector):
     """
-    Group configurations, removing cyclic permutation duplicates.
+    Get canonical form accounting for cyclic permutation and sign-flip symmetries.
+    
+    Returns the lexicographically smallest representation among all:
+    - Cyclic rotations
+    - Sign-flipped versions of all rotations
+    """
+    n = len(state_vector)
+    candidates = []
+    
+    # Generate all cyclic rotations
+    for shift in range(n):
+        rotated = np.roll(state_vector, shift)
+        candidates.append(tuple(rotated))
+        # Also add sign-flipped version
+        flipped = -rotated
+        candidates.append(tuple(flipped))
+    
+    # Return lexicographically smallest (canonical form)
+    return min(candidates)
+
+def group_configurations(all_state_vectors):
+    """
+    Group configurations by canonical form, accounting for cyclic and sign-flip symmetries.
+    
+    Args:
+        all_state_vectors: List of state vectors (each is array of -1/0/+1)
     
     Returns:
-        List of tuples: (representative_config, list_of_indices)
+        List of tuples: (canonical_form, list_of_indices)
     """
-    unique_groups = []
+    canonical_to_indices = {}
     
-    for i, config in enumerate(all_configs):
-        # Check if this config matches any existing group
-        matched = False
-        for group_config, indices in unique_groups:
-            if are_cyclic_permutations(config, group_config, tolerance_deg):
-                indices.append(i)
-                matched = True
-                break
+    for i, state_vec in enumerate(all_state_vectors):
+        canonical = get_canonical_form(state_vec)
         
-        if not matched:
-            # Create new group
-            unique_groups.append((config, [i]))
+        if canonical not in canonical_to_indices:
+            canonical_to_indices[canonical] = []
+        canonical_to_indices[canonical].append(i)
     
-    return unique_groups
+    # Convert to list of tuples
+    return [(np.array(canonical), indices) for canonical, indices in canonical_to_indices.items()]
 
 if analyze_btn:
     st.header("📊 Configuration Analysis (100 Simulations)")
@@ -247,7 +278,7 @@ if analyze_btn:
     progress_bar = st.progress(0)
     
     all_final_states = []
-    all_final_angles = []
+    all_state_vectors = []
     
     for seed_idx in range(1, 101):
         # Update progress
@@ -271,15 +302,18 @@ if analyze_btn:
         angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
         angles_deg = normalize_angles_to_degrees(angles_0_2pi)
         
+        # Convert to discrete state vector
+        state_vec = angles_to_state_vector(angles_deg)
+        
         all_final_states.append(X_final)
-        all_final_angles.append(angles_deg)
+        all_state_vectors.append(state_vec)
     
     progress_bar.empty()
     st.success("✅ Completed 100 simulations!")
     
-    # Group configurations
-    st.info("Grouping unique configurations (removing rotational duplicates)...")
-    unique_groups = group_configurations(all_final_angles, tolerance_deg=float(angle_tolerance))
+    # Group configurations by canonical form (with symmetries)
+    st.info("Grouping unique configurations (accounting for cyclic and sign-flip symmetries)...")
+    unique_groups = group_configurations(all_state_vectors)
     
     # Sort by frequency (most common first)
     unique_groups.sort(key=lambda x: len(x[1]), reverse=True)
@@ -288,23 +322,27 @@ if analyze_btn:
     
     # Display results
     st.subheader(f"Unique Configurations (Total: {len(unique_groups)})")
-    
-    # Create columns for display
-    n_configs = len(unique_groups)
+    st.caption("Fold states: +1=Outward, 0=Flat (±10%), -1=Inward")
     
     # Display each configuration
-    for config_idx, (representative_config, sim_indices) in enumerate(unique_groups):
+    for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
         st.markdown(f"---")
         st.markdown(f"### Configuration #{config_idx + 1}")
         
-        # Create 2 columns: angles/stats and visualization
+        # Create 2 columns: state/stats and visualization
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            st.markdown("**📐 Hinge Angles (degrees)**")
-            # Display angles as a formatted list
-            angles_str = ", ".join([f"{a:.1f}°" for a in representative_config])
-            st.text(angles_str)
+            st.markdown("**📐 Fold State Pattern**")
+            # Display state vector with symbols
+            state_symbols = {-1: "⬇ Inward", 0: "➖ Flat", 1: "⬆ Outward"}
+            state_str = ", ".join([f"{s:+d}" for s in canonical_state])
+            st.code(state_str)
+            
+            # Show symbolic representation
+            with st.expander("Details"):
+                for i, s in enumerate(canonical_state):
+                    st.text(f"Hinge {i+1}: {state_symbols[s]}")
             
             st.markdown("**🔢 Statistics**")
             count = len(sim_indices)
@@ -320,7 +358,7 @@ if analyze_btn:
                 st.text(seeds_str)
         
         with col2:
-            st.markdown("**🎨 3D Visualization**")
+            st.markdown("**🎨 3D Visualization (Representative)**")
             # Get one representative final state
             repr_state_idx = sim_indices[0]
             X_repr = all_final_states[repr_state_idx]
