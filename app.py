@@ -133,7 +133,7 @@ else:
     hinge_state, error_msg = create_manual_states(H, default_all, manual_text)
     if error_msg:
         st.error(error_msg)
-        st.stop()
+            st.stop()
 
 # Show preview
 st.caption(f"Hinges: {H} — mode: {hinge_mode}")
@@ -297,8 +297,8 @@ if analyze_btn:
         st.markdown(f"---")
         st.markdown(f"### Configuration #{config_idx + 1}")
         
-        # Create 3 columns: angles, visualization, stats
-        col1, col2, col3 = st.columns([1, 2, 1])
+        # Create 2 columns: angles/stats and visualization
+        col1, col2 = st.columns([1, 2])
         
         with col1:
             st.markdown("**📐 Hinge Angles (degrees)**")
@@ -332,20 +332,3 @@ if analyze_btn:
             config_fig = plot_hinge_angles(X_repr, faces_oriented_repr, hinges_ordered_repr, angles_repr)
             config_fig.update_layout(height=400, width=600)
             st.plotly_chart(config_fig, use_container_width=True)
-        
-        with col3:
-            st.markdown("**📊 Angle Distribution**")
-            # Show histogram of angles for this config
-            import plotly.graph_objects as go
-            angle_hist = go.Figure(data=[go.Histogram(
-                x=representative_config,
-                nbinsx=12,
-                marker_color='lightblue'
-            )])
-            angle_hist.update_layout(
-                xaxis_title="Angle (deg)",
-                yaxis_title="Count",
-                height=300,
-                margin=dict(l=20, r=20, t=20, b=20)
-            )
-            st.plotly_chart(angle_hist, use_container_width=True)
