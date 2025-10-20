@@ -430,23 +430,44 @@ if analyze_btn:
         count = len(sim_indices)
         state_symbols = {-1: "⬇ Inward", 0: "➖ Flat", 1: "⬆ Outward"}
         
+        # Get representative state and create visualization
+        repr_state_idx = sim_indices[0]
+        X_repr = all_final_states[repr_state_idx]
+        angles_repr, faces_oriented_repr, hinges_ordered_repr = compute_dihedrals_robust(X_repr, faces)
+        config_fig = plot_hinge_angles(X_repr, faces_oriented_repr, hinges_ordered_repr, angles_repr)
+        config_fig.update_layout(height=400, width=600)
+        
+        # Convert Plotly figure to HTML div
+        fig_html = config_fig.to_html(include_plotlyjs='cdn', div_id=f"plot_{config_idx}")
+        
         html_report += f"""
         <div class="config">
             <h3>Configuration #{config_idx + 1}</h3>
-            <div class="state">{state_str}</div>
-            <div class="stats">
-                <strong>Occurrences:</strong> {count} / {n_sims_int}<br>
-                <strong>Seeds:</strong> {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
-            </div>
-            <p><strong>Hinge Details:</strong></p>
-            <ul>
+            <table style="width: 100%; border: none;">
+                <tr>
+                    <td style="width: 50%; vertical-align: top; border: none;">
+                        <div class="state">{state_str}</div>
+                        <div class="stats">
+                            <strong>Occurrences:</strong> {count} / {n_sims_int}<br>
+                            <strong>Seeds:</strong> {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
+                        </div>
+                        <p><strong>Hinge Details:</strong></p>
+                        <ul>
         """
         
         for i, s in enumerate(canonical_state):
             html_report += f"<li>Hinge {i+1}: {state_symbols[s]}</li>"
         
-        html_report += """
-            </ul>
+        html_report += f"""
+                        </ul>
+                    </td>
+                    <td style="width: 50%; vertical-align: top; border: none;">
+                        <div style="width: 100%; height: 400px;">
+                            {fig_html}
+                        </div>
+                    </td>
+                </tr>
+            </table>
         </div>
         """
     
@@ -455,20 +476,8 @@ if analyze_btn:
     </html>
     """
     
-    # Download buttons
-    col_html, col_pdf = st.columns(2)
-    
-    with col_html:
-        st.download_button(
-            label="📄 Download HTML Report",
-            data=html_report,
-            file_name="configuration_analysis.html",
-            mime="text/html"
-        )
-    
-    with col_pdf:
-        # For PDF, we'll create a text-based report since generating actual PDFs requires additional libraries
-        pdf_text_report = f"""Configuration Analysis Report
+    # Generate text report
+    pdf_text_report = f"""Configuration Analysis Report
 {'='*50}
 
 Total Simulations: {n_sims_int}
@@ -480,20 +489,34 @@ SUMMARY
 {'='*50}
 
 """
-        
-        for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
-            state_str = ", ".join([f"{s:+d}" for s in canonical_state])
-            count = len(sim_indices)
-            pdf_text_report += f"""Configuration #{config_idx + 1}
+    
+    for config_idx, (canonical_state, sim_indices) in enumerate(unique_groups):
+        state_str = ", ".join([f"{s:+d}" for s in canonical_state])
+        count = len(sim_indices)
+        pdf_text_report += f"""Configuration #{config_idx + 1}
 Fold State Pattern: {state_str}
 Occurrences: {count} / {n_sims_int}
 Seeds: {", ".join([str(i+1) for i in sim_indices[:20]])}{"..." if len(sim_indices) > 20 else ""}
 
 """
-        
+    
+    # Download buttons with unique keys to prevent app reset
+    col_html, col_pdf = st.columns(2)
+    
+    with col_html:
+        st.download_button(
+            label="📄 Download HTML Report",
+            data=html_report,
+            file_name="configuration_analysis.html",
+            mime="text/html",
+            key="download_html_report"
+        )
+    
+    with col_pdf:
         st.download_button(
             label="📑 Download Text Report (PDF-compatible)",
             data=pdf_text_report,
             file_name="configuration_analysis.txt",
-            mime="text/plain"
+            mime="text/plain",
+            key="download_text_report"
         )
