@@ -76,6 +76,11 @@ integration_method = st.sidebar.selectbox("Integration method",
 sim_seed = st.sidebar.number_input("Seed (simulation noise)", value=1, step=1)
 run_btn = st.sidebar.button("Run Simulation")
 
+# Configuration analysis
+st.sidebar.header("4) Configuration Analysis")
+analyze_btn = st.sidebar.button("Run 100 Simulations & Analyze Configs", help="Run 100 simulations with different seeds to identify unique final configurations")
+angle_tolerance = st.sidebar.number_input("Angle tolerance (degrees)", 1.0, 10.0, 2.0, 0.5, help="Tolerance for grouping similar configurations")
+
 # -----------------------
 # Data Loading and Processing
 # -----------------------
@@ -181,3 +186,166 @@ if run_btn:
 
 else:
     st.info("Upload your torque–angle file to begin.")
+
+# -----------------------
+# Configuration Analysis (100 simulations)
+# -----------------------
+
+def normalize_angles_to_degrees(angles):
+    """Convert angles to degrees in [0, 360) range."""
+    return np.mod(np.degrees(angles), 360.0)
+
+def are_cyclic_permutations(config1, config2, tolerance_deg=2.0):
+    """Check if two configurations are cyclic permutations of each other."""
+    n = len(config1)
+    if len(config2) != n:
+        return False
+    
+    # Try all possible rotations
+    for shift in range(n):
+        rotated = np.roll(config2, shift)
+        if np.allclose(config1, rotated, atol=tolerance_deg):
+            return True
+    return False
+
+def group_configurations(all_configs, tolerance_deg=2.0):
+    """
+    Group configurations, removing cyclic permutation duplicates.
+    
+    Returns:
+        List of tuples: (representative_config, list_of_indices)
+    """
+    unique_groups = []
+    
+    for i, config in enumerate(all_configs):
+        # Check if this config matches any existing group
+        matched = False
+        for group_config, indices in unique_groups:
+            if are_cyclic_permutations(config, group_config, tolerance_deg):
+                indices.append(i)
+                matched = True
+                break
+        
+        if not matched:
+            # Create new group
+            unique_groups.append((config, [i]))
+    
+    return unique_groups
+
+if analyze_btn:
+    st.header("📊 Configuration Analysis (100 Simulations)")
+    
+    # Per-hinge weights (uniform for now)
+    weights = jnp.ones(hinges.shape[0], dtype=jnp.float32)
+    
+    # Build total energy function
+    hinge_energy_fn = make_hinge_energy_fn(faces, hinges, hinge_state, weights, learned_energy_fn)
+    hinge_grad = jax.grad(hinge_energy_fn)
+    
+    # Run 100 simulations
+    st.info("Running 100 simulations with seeds 1-100...")
+    progress_bar = st.progress(0)
+    
+    all_final_states = []
+    all_final_angles = []
+    
+    for seed_idx in range(1, 101):
+        # Update progress
+        progress_bar.progress(seed_idx / 100)
+        
+        # Run simulation
+        key = jax.random.PRNGKey(seed_idx)
+        traj = simulate(
+            key, vertices, faces, edges, hinges, hinge_state,
+            steps=int(steps), dt=float(dt), sigma=float(sigma),
+            theta_gain=float(theta_gain), w_col=float(w_col),
+            proj_steps=int(proj_steps), proj_lr=float(proj_lr),
+            hinge_grad=hinge_grad,
+            method=integration_method
+        )
+        
+        # Get final state
+        X_final = np.asarray(traj[-1])
+        
+        # Compute angles (use robust method to get consistent ordering)
+        angles_0_2pi, faces_oriented, hinges_ordered = compute_dihedrals_robust(X_final, faces)
+        angles_deg = normalize_angles_to_degrees(angles_0_2pi)
+        
+        all_final_states.append(X_final)
+        all_final_angles.append(angles_deg)
+    
+    progress_bar.empty()
+    st.success("✅ Completed 100 simulations!")
+    
+    # Group configurations
+    st.info("Grouping unique configurations (removing rotational duplicates)...")
+    unique_groups = group_configurations(all_final_angles, tolerance_deg=float(angle_tolerance))
+    
+    # Sort by frequency (most common first)
+    unique_groups.sort(key=lambda x: len(x[1]), reverse=True)
+    
+    st.success(f"✅ Found {len(unique_groups)} unique configurations!")
+    
+    # Display results
+    st.subheader(f"Unique Configurations (Total: {len(unique_groups)})")
+    
+    # Create columns for display
+    n_configs = len(unique_groups)
+    
+    # Display each configuration
+    for config_idx, (representative_config, sim_indices) in enumerate(unique_groups):
+        st.markdown(f"---")
+        st.markdown(f"### Configuration #{config_idx + 1}")
+        
+        # Create 3 columns: angles, visualization, stats
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            st.markdown("**📐 Hinge Angles (degrees)**")
+            # Display angles as a formatted list
+            angles_str = ", ".join([f"{a:.1f}°" for a in representative_config])
+            st.text(angles_str)
+            
+            st.markdown("**🔢 Statistics**")
+            count = len(sim_indices)
+            percentage = (count / 100.0) * 100
+            st.metric("Occurrences", f"{count} / 100")
+            st.metric("Percentage", f"{percentage:.1f}%")
+            
+            # Show which seeds produced this config
+            with st.expander("Seeds"):
+                seeds_str = ", ".join([str(i+1) for i in sim_indices[:20]])
+                if len(sim_indices) > 20:
+                    seeds_str += f"... (+{len(sim_indices)-20} more)"
+                st.text(seeds_str)
+        
+        with col2:
+            st.markdown("**🎨 3D Visualization**")
+            # Get one representative final state
+            repr_state_idx = sim_indices[0]
+            X_repr = all_final_states[repr_state_idx]
+            
+            # Use robust method to get properly oriented faces and hinges
+            angles_repr, faces_oriented_repr, hinges_ordered_repr = compute_dihedrals_robust(X_repr, faces)
+            
+            # Create visualization
+            config_fig = plot_hinge_angles(X_repr, faces_oriented_repr, hinges_ordered_repr, angles_repr)
+            config_fig.update_layout(height=400, width=600)
+            st.plotly_chart(config_fig, use_container_width=True)
+        
+        with col3:
+            st.markdown("**📊 Angle Distribution**")
+            # Show histogram of angles for this config
+            import plotly.graph_objects as go
+            angle_hist = go.Figure(data=[go.Histogram(
+                x=representative_config,
+                nbinsx=12,
+                marker_color='lightblue'
+            )])
+            angle_hist.update_layout(
+                xaxis_title="Angle (deg)",
+                yaxis_title="Count",
+                height=300,
+                margin=dict(l=20, r=20, t=20, b=20)
+            )
+            st.plotly_chart(angle_hist, use_container_width=True)
